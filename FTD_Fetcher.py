@@ -15,7 +15,66 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parent
 ENV_FILE = REPO_ROOT / ".env"
 EXPORT_DIR = REPO_ROOT / "data"
-MAX_DISCORD_ROWS = 25
+DEFAULT_MAX_DISCORD_ROWS = 25
+DISCORD_FIELD_CHAR_LIMIT = 1024
+
+
+def resolve_log_file(env_data: Dict[str, Union[List[str], str]]) -> Optional[Path]:
+    """Determine the log file path configured via .env."""
+    raw_value = env_data.get("LOG_FILE_PATH")
+    if not raw_value:
+        return None
+    normalized = normalize_env_path(str(raw_value))
+    if not normalized:
+        return None
+    path = Path(normalized).expanduser()
+    return path
+
+
+def _load_post_log(log_path: Path) -> Dict[str, Union[str, list]]:
+    """Load the existing log data if available."""
+    if not log_path.exists():
+        return {}
+    try:
+        with log_path.open() as fp:
+            return json.load(fp)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_post_log(log_path: Path, record: Dict[str, Union[str, list]]) -> None:
+    """Persist the log data, ensuring its parent directory exists."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w") as fp:
+        json.dump(record, fp, indent=2)
+
+
+def should_skip_post_for_date(date_str: str, log_path: Optional[Path]) -> bool:
+    """Return True if we already posted for the given settlement date."""
+    if log_path is None:
+        return False
+    record = _load_post_log(log_path)
+    return record.get("latest_settlement_date") == date_str
+
+
+def update_post_log(log_path: Optional[Path], date_str: str) -> None:
+    """Append metadata for the settlement date we just posted."""
+    if log_path is None:
+        return
+    record = _load_post_log(log_path)
+    history = record.get("history", [])
+    history.append(
+        {
+            "settlement_date": date_str,
+            "posted_at": dt.datetime.utcnow().isoformat(),
+        }
+    )
+    history = history[-30:]
+    payload = {
+        "latest_settlement_date": date_str,
+        "history": history,
+    }
+    _write_post_log(log_path, payload)
 
 
 def strip_quotes(value: str) -> str:
@@ -24,6 +83,15 @@ def strip_quotes(value: str) -> str:
     if len(trimmed) >= 2 and ((trimmed[0] == trimmed[-1] == '"') or (trimmed[0] == trimmed[-1] == "'")):
         return trimmed[1:-1]
     return trimmed
+
+
+def normalize_env_path(value: str) -> str:
+    """Expand missing separators and treat escaped spaces like literal spaces."""
+    trimmed = strip_quotes(value)
+    if not trimmed:
+        return ""
+    normalized = trimmed.replace("\\ ", " ")
+    return os.path.expandvars(normalized)
 
 
 def load_env_file(env_path: Path) -> Dict[str, Union[List[str], str]]:
@@ -119,38 +187,58 @@ def render_template(template: object, context: Dict[str, str]) -> object:
     return template
 
 
+def resolve_max_discord_rows(env_data: Dict[str, Union[List[str], str]]) -> int:
+    """Read MAX_DISCORD_ROWS from the parsed .env data, falling back to a default."""
+    raw_value = env_data.get("MAX_DISCORD_ROWS")
+    if raw_value is None:
+        return DEFAULT_MAX_DISCORD_ROWS
+    raw_str = strip_quotes(str(raw_value))
+    try:
+        parsed = int(raw_str)
+        return parsed if parsed > 0 else DEFAULT_MAX_DISCORD_ROWS
+    except ValueError:
+        return DEFAULT_MAX_DISCORD_ROWS
+
+
 def build_discord_context(
-    dataframe: pd.DataFrame, settlement_date: str, landing_url: Optional[str], max_rows: int = MAX_DISCORD_ROWS
+    dataframe: pd.DataFrame, settlement_date: str, landing_url: Optional[str], max_rows: Optional[int] = None
 ) -> Dict[str, str]:
     """Build the dictionary of placeholder values for the Discord payload."""
+    rows = max_rows if max_rows is not None and max_rows > 0 else DEFAULT_MAX_DISCORD_ROWS
     context: Dict[str, str] = {
         "latest_settlement_date_formatted": settlement_date,
         "latest_ftd_url": landing_url or "",
     }
 
-    subset = dataframe.head(max_rows)
+    subset = dataframe.head(rows)
 
-    def join_column(column: str) -> str:
+    def join_column(column: str, prefix: str = "", suffix: str = "") -> str:
         values = []
         for value in subset[column]:
             if pd.isna(value):
                 values.append("")
             else:
-                values.append(str(value))
+                raw = str(value)
+                formatted = f"{prefix}{raw}{suffix}" if raw else ""
+                values.append(formatted)
         joined = "\n".join(values)
-        if len(dataframe) > max_rows:
+        if len(dataframe) > rows:
             joined = f"{joined}\n..."
+        if len(joined) > DISCORD_FIELD_CHAR_LIMIT:
+            joined = f"{joined[:DISCORD_FIELD_CHAR_LIMIT - 3]}..."
         return joined or "-"
 
-    context["ftd_data.symbol"] = join_column("Symbol")
-    context["ftd_data.quantity"] = join_column("QuantityFails")
+    context["ftd_data.symbol"] = join_column("Symbol", prefix="$")
+    context["ftd_data.quantity"] = join_column("QuantityFails", suffix=" shares")
     context["ftd_data.ftd_value"] = join_column("FTD_Value")
     return context
 
 
 def load_template(template_path_value: str) -> dict:
     """Load the JSON template referenced in the .env."""
-    expanded = os.path.expandvars(strip_quotes(template_path_value))
+    expanded = normalize_env_path(template_path_value)
+    if not expanded:
+        raise FileNotFoundError("Discord template path is empty")
     template_path = Path(expanded)
     if not template_path.is_absolute():
         template_path = REPO_ROOT / template_path
@@ -189,13 +277,15 @@ def send_discord_notifications(
     landing_url: Optional[str],
     attachment_path: Optional[Path],
     use_test: bool = False,
-) -> None:
+    env_data: Optional[Dict[str, Union[List[str], str]]] = None,
+) -> bool:
     """Render the template and post to every webhook configured in .env."""
-    env_data = load_env_file(ENV_FILE)
+    if env_data is None:
+        env_data = load_env_file(ENV_FILE)
     template_raw = env_data.get("DISCORD_WEBHOOK_TEMPLATE")
     if not template_raw:
         print("⚠️ Discord template is not configured (.env DISCORD_WEBHOOK_TEMPLATE). Skipping.")
-        return
+        return False
 
     try:
         template = load_template(template_raw)
@@ -203,14 +293,15 @@ def send_discord_notifications(
         print(f"⚠️ {exc}")
         return
 
-    context = build_discord_context(dataframe, settlement_date, landing_url, MAX_DISCORD_ROWS)
+    row_limit = resolve_max_discord_rows(env_data)
+    context = build_discord_context(dataframe, settlement_date, landing_url, max_rows=row_limit)
     payload = render_template(template, context)
 
     webhook_key = "DISCORD_WEBHOOK_TEST_URL" if use_test else "DISCORD_WEBHOOK_URL"
     raw_targets = env_data.get(webhook_key)
     if not raw_targets:
         print(f"⚠️ No Discord webhook targets defined for {webhook_key}. Skipping.")
-        return
+        return False
 
     if isinstance(raw_targets, list):
         target_lines = raw_targets
@@ -220,7 +311,7 @@ def send_discord_notifications(
     targets = parse_webhook_entries(target_lines)
     if not targets:
         print(f"⚠️ Discord webhook list for {webhook_key} is empty after parsing. Skipping.")
-        return
+        return False
 
     attachment_to_send: Optional[Path] = None
     if attachment_path:
@@ -229,12 +320,16 @@ def send_discord_notifications(
         else:
             print(f"⚠️ Attachment {attachment_path} not found; sending webhook without file.")
 
+    posted_any = False
     for webhook_url, thread_id in targets:
         try:
             post_to_discord(webhook_url, payload, thread_id, attachment_to_send)
+            posted_any = True
             print(f"✅ Posted Discord payload to {webhook_url}")
         except requests.RequestException as exc:
             print(f"⚠️ Failed to post to {webhook_url}: {exc}")
+
+    return posted_any
 
 
 def build_url(year, month, half):
@@ -389,16 +484,11 @@ def fetch_top_ftds(num_results=200, export=True):
 
     # Export to Excel format (.xlsx)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    excel_path = EXPORT_DIR / f"FTD_Top{num_results}_{latest_date_str}.xlsx"
+    excel_path = EXPORT_DIR / f"FTD_Top_{num_results}_{latest_date_str}.xlsx"
     top_results.to_excel(excel_path, index=False, engine="openpyxl")
     print(f"\n✅ Exported Excel (XLSX) file: {excel_path}")
 
-    if export:
-        csv_path = EXPORT_DIR / f"FTD_Top{num_results}_{latest_date_str}.csv"
-        top_results.to_csv(csv_path, index=False)
-        print(f"\n✅ Exported CSV file: {csv_path}")
-
-    return top_results, latest_settlement_date_formatted, download_url, excel_path
+    return top_results, latest_settlement_date_formatted, latest_date_str, download_url, excel_path
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch and export top FTD data")
@@ -406,6 +496,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-export", action="store_true", help="Skip file export")
     parser.add_argument("--discord", action="store_true", help="Post the result set to configured Discord webhooks")
     parser.add_argument("--test", action="store_true", help="Use the test Discord webhook list instead of the production list")
+    parser.add_argument("--force", action="store_true", help="Force a Discord post even if the latest date has already been sent")
 
     args = parser.parse_args()
 
@@ -413,15 +504,26 @@ if __name__ == "__main__":
         print("Error: Number of results must be greater than 0")
         sys.exit(1)
 
-    top_results, latest_settlement_date, latest_url, latest_export = fetch_top_ftds(
+    top_results, latest_settlement_date, latest_date_str, latest_url, latest_export = fetch_top_ftds(
         num_results=args.num_results, export=not args.no_export
     )
 
     if args.discord:
-        send_discord_notifications(
-            top_results,
-            latest_settlement_date,
-            latest_url,
-            attachment_path=latest_export,
-            use_test=args.test,
-        )
+        env_data = load_env_file(ENV_FILE)
+        log_path = resolve_log_file(env_data)
+        already_posted = not args.force and should_skip_post_for_date(latest_date_str, log_path)
+        if already_posted:
+            print(f"⚠️ Discord post skipped because {latest_date_str} is already logged; use --force to override.")
+        else:
+            posted = send_discord_notifications(
+                top_results,
+                latest_settlement_date,
+                latest_url,
+                attachment_path=latest_export,
+                use_test=args.test,
+                env_data=env_data,
+            )
+            if posted:
+                update_post_log(log_path, latest_date_str)
+            else:
+                print("⚠️ Discord post failed; log entry not updated so the next run can retry.")

@@ -1,8 +1,8 @@
 """
 Discord bot for FTD Top 200 reporting using Pycord.
 
-This bot exposes a "/ftd_top200" slash command that runs the local
-FTD_Top200.py script and posts the results (along with any generated
+This bot exposes a "/ftd_top_250" slash command that runs the local
+FTD_Top_250.py script and posts the results (along with any generated
 CSV and XLSX files) into the configured channel. The bot also
 schedules a daily run at 3 AM Eastern. Make sure the bot is invited
 with the applications.commands scope for slash commands to appear.
@@ -20,10 +20,10 @@ except ImportError:
 import discord
 
 async def run_ftd_script() -> str:
-    """Run the FTD_Top200.py script and return its combined stdout/stderr."""
+    """Run the FTD_Top_250.py script and return its combined stdout/stderr."""
     proc = await asyncio.create_subprocess_exec(
         os.getenv("PYTHON", "python3"),
-        os.path.join(os.path.dirname(__file__), "FTD_Top200.py"),
+        os.path.join(os.path.dirname(__file__), "FTD_Top_250.py"),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -47,8 +47,8 @@ async def send_report(bot: discord.Bot, channel_id: int) -> None:
         import glob
         from pathlib import Path
         workdir = Path(os.path.dirname(__file__))
-        csv_files = sorted(glob.glob(str(workdir / "FTD_Top200_*.csv")), key=os.path.getmtime, reverse=True)
-        xlsx_files = sorted(glob.glob(str(workdir / "FTD_Top200_*.xlsx")), key=os.path.getmtime, reverse=True)
+        csv_files = sorted(glob.glob(str(workdir / "FTD_Top_250_*.csv")), key=os.path.getmtime, reverse=True)
+        xlsx_files = sorted(glob.glob(str(workdir / "FTD_Top_250_*.xlsx")), key=os.path.getmtime, reverse=True)
         for flist in (csv_files, xlsx_files):
             if flist:
                 latest = flist[0]
@@ -74,7 +74,7 @@ async def scheduler(bot: discord.Bot, channel_id: int) -> None:
         try:
             await send_report(bot, channel_id)
         except Exception as exc:
-            print(f"Error sending FTD_Top200 report: {exc}")
+            print(f"Error sending FTD_Top_250 report: {exc}")
         await asyncio.sleep(5)
 
 class FTDTop200Client(discord.Bot):
@@ -90,14 +90,14 @@ class FTDTop200Client(discord.Bot):
 
     async def setup_hook(self) -> None:
         @self.slash_command(
-            name="ftd_top200",
+            name="ftd_Top_250",
             description="Run FTD Top 200 script and post the results in this channel.",
         )
-        async def ftd_top200(ctx: discord.ApplicationContext) -> None:
+        async def ftd_Top_250(ctx: discord.ApplicationContext) -> None:
             await ctx.defer(ephemeral=True)
             try:
                 await send_report(self, self.channel_id)
-                await ctx.respond("FTD_Top200 report posted.")
+                await ctx.respond("FTD_Top_250 report posted.")
             except Exception as exc:
                 await ctx.respond(f"Failed: {exc}", delete_after=30)
         # Register commands globally (note: may take up to an hour to appear)
