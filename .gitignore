@@ -6,6 +6,10 @@
 
 # Venv
 venv
+.venv
+
+# Environment variables
+.env
 
 # MacOS
 .DS_Store
