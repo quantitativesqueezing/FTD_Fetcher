@@ -21,7 +21,7 @@ python3 -m pip install -U requests pandas openpyxl
 python3 -m pip install -U git+https://github.com/Pycord-Development/pycord
 
 # Run the Script with the specified number of results.
-python3 FTDFetcher.py $num_results
+python3 FTD_Fetcher.py $num_results
 
 # Remove the Virtual Environment when we're finished
 rm -rf ./venv

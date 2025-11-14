@@ -1,0 +1,35 @@
+{
+  "username": "QuantitativeSqueezing",
+  "avatar_url": "https://pbs.twimg.com/profile_images/1459845340996190212/bDPUvUBZ_400x400.jpg",
+  "content": "",
+  "embeds": [
+    {
+      "author": {
+        "name": "FTD Fetcher Bot",
+        "url": "https://x.com/FloridaManFin",
+        "icon_url": "https://pbs.twimg.com/profile_images/1459845340996190212/bDPUvUBZ_400x400.jpg"
+      },
+      "title": "Top 250 FTD Stocks ({latest_settlement_date_formatted})",
+      "url": "https://www.sec.gov/data-research/sec-markets-data/fails-deliver-data#view-field-display-title-table-column",
+      "description": "https://www.sec.gov/data-research/sec-markets-data/fails-deliver-data",
+      "color": 1210347,
+      "fields": [
+        {
+          "name": "Symbol",
+          "value": "{ftd_data.symbol}",
+          "inline": true
+        },
+        {
+          "name": "Quantity",
+          "value": "{ftd_data.quantity}",
+          "inline": true
+        },
+        {
+          "name": "FTD Value",
+          "value": "{ftd_data.ftd_value}",
+          "inline": true
+        }
+      ]
+    }
+  ]
+}
