@@ -291,7 +291,7 @@ def send_discord_notifications(
         template = load_template(template_raw)
     except FileNotFoundError as exc:
         print(f"⚠️ {exc}")
-        return
+        return False
 
     row_limit = resolve_max_discord_rows(env_data)
     context = build_discord_context(dataframe, settlement_date, landing_url, max_rows=row_limit)
